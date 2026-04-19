@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import heapq
 import math
+import random
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -10,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 class Wafer:
     wafer_id: str
     release_time: float = 0.0
+    processing_times: List[float] = field(default_factory=list)  # 每个晶圆在每台机器上的加工时间
     next_op_index: int = 0
     ready_time: float = 0.0
     history: List[Dict[str, Any]] = field(default_factory=list)
@@ -54,6 +56,7 @@ class SimulationResult:
     schedule: List[Dict[str, Any]]
     wafer_histories: Dict[str, List[Dict[str, Any]]]
     total_energy_cost: float
+    machine_schedule: List[Dict[str, Any]]
 
 
 class PSOSimulator:
@@ -115,12 +118,15 @@ class PSOSimulator:
             return
         if machine.machine_type == "standard":
             selected = [self._select_standard_job(queue)]
+            processing_time = selected[0].processing_times[machine_index]
         else:
             selected = self._select_batch_jobs(queue, machine.batch_capacity)
+            # 批处理时间与所选wafers相关：取最大值（批处理需要等待最长的那个）
+            processing_time = max(wafer.processing_times[machine_index] for wafer in selected)
         if not selected:
             return
         start_time = max(current_time, max(wafer.ready_time for wafer in selected))
-        end_time = start_time + machine.processing_time
+        end_time = start_time + processing_time
         self.machine_busy_until[machine_index] = end_time
         self.machine_jobs[machine_index] = selected
         for wafer in selected:
@@ -129,6 +135,8 @@ class PSOSimulator:
         self.machine_histories[machine_index].append({
             "machine": machine.machine_id,
             "operation": machine.operation_name,
+            "machine_type": machine.machine_type,
+            "jobs": [wafer.wafer_id for wafer in selected],
             "start": start_time,
             "end": end_time,
         })
@@ -182,8 +190,15 @@ class PSOSimulator:
         all_history = {wafer.wafer_id: wafer.history for wafer in wafers}
         makespan = max((entry["end"] for history in all_history.values() for entry in history), default=initial_time)
         schedule_list = [entry for history in all_history.values() for entry in history]
+        machine_schedule = [entry for history in self.machine_histories for entry in history]
         total_energy_cost = calculate_energy_cost(self.machine_histories, self.config)
-        return SimulationResult(makespan=makespan, schedule=schedule_list, wafer_histories=all_history, total_energy_cost=total_energy_cost)
+        return SimulationResult(
+            makespan=makespan,
+            schedule=schedule_list,
+            wafer_histories=all_history,
+            total_energy_cost=total_energy_cost,
+            machine_schedule=machine_schedule,
+        )
 
 
 def get_tou_price(hour: float) -> float:
@@ -251,12 +266,48 @@ def build_default_factory_config(batch_capacity: int = 4) -> List[MachineConfig]
     ]
 
 
+def generate_wafers(
+    num_wafers: int,
+    num_operations: int,
+    seed: int = 42,
+    release_range: Tuple[float, float] = (0.0, 10.0),
+    process_range: Tuple[float, float] = (10.0, 30.0),
+) -> List[Wafer]:
+    """Generate wafers with diverse processing times and overlapped release times.
+    
+    Args:
+        num_wafers: Number of wafers to generate
+        num_operations: Number of operations per wafer
+        seed: Random seed for reproducibility
+        release_range: Range for wafer release times (default tight overlap)
+        process_range: Range for processing times per operation
+    """
+    rng = random.Random(seed)
+    wafers: List[Wafer] = []
+    # 每个晶圆在不同工序上的处理时间不同，这样优化调度的效果才明显
+    for i in range(num_wafers):
+        release_time = rng.uniform(release_range[0], release_range[1])
+        # 每个晶圆的处理时间不同，增加问题难度
+        processing_times = [rng.uniform(process_range[0], process_range[1]) for _ in range(num_operations)]
+        wafers.append(
+            Wafer(
+                wafer_id=f"W{i+1}",
+                release_time=release_time,
+                processing_times=processing_times,
+            )
+        )
+    return wafers
+
+
 if __name__ == "__main__":
     import random
 
-    random.seed(100)
+    random.seed(42)  # 统一随机种子
     num_wafers = 5
-    wafers = [Wafer(wafer_id=f"W{i+1}", release_time=0.0) for i in range(num_wafers)]
+    wafers = []
+    for i in range(num_wafers):
+        processing_times = [random.uniform(10, 50) for _ in range(9)]  # 9 operations
+        wafers.append(Wafer(wafer_id=f"W{i+1}", release_time=0.0, processing_times=processing_times))
     action_vector = [random.random() for _ in range(2 * num_wafers)]
     simulator = PSOSimulator(build_default_factory_config(batch_capacity=4))
     result = simulator.decode(action_vector, wafers)

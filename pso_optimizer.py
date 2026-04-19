@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Callable
 import numpy as np
 
-from pso_encoding_decoding import PSOSimulator, Wafer, build_default_factory_config, SimulationResult
+from pso_encoding_decoding import PSOSimulator, Wafer, build_default_factory_config, generate_wafers, SimulationResult
 
 
 @dataclass
@@ -34,13 +34,20 @@ class PSOConfig:
 
 
 class PSOOptimizer:
-    def __init__(self, config: PSOConfig, simulator: PSOSimulator):
+    def __init__(self, config: PSOConfig, simulator: PSOSimulator, wafers: Optional[List[Wafer]] = None):
         self.config = config
         self.simulator = simulator
         self.particles: List[Particle] = []
         self.global_best_position: List[float] = []
         self.global_best_fitness: float = float('inf')
         self.global_best_result: Optional[SimulationResult] = None
+
+        # Use an externally provided wafer set if available; otherwise generate a reproducible one.
+        self.wafers = wafers if wafers is not None else generate_wafers(
+            self.config.num_wafers,
+            self.simulator.num_operations,
+            seed=42,
+        )
 
         # Initialize particles
         self._initialize_particles()
@@ -56,8 +63,8 @@ class PSOOptimizer:
 
     def _evaluate_fitness(self, position: List[float]) -> Tuple[float, SimulationResult]:
         """Evaluate fitness of a position using the simulator."""
-        wafers = [Wafer(wafer_id=f"W{i+1}", release_time=0.0) for i in range(self.config.num_wafers)]
-        result = self.simulator.decode(position, wafers)
+        # 传入固定的 wafers 进行解码仿真
+        result = self.simulator.decode(position, self.wafers)
 
         # Multi-objective fitness: weighted sum
         fitness = (self.config.makespan_weight * result.makespan +
@@ -149,8 +156,11 @@ def run_pso_comparison():
     # Setup simulator
     simulator = PSOSimulator(build_default_factory_config(batch_capacity=4))
 
-    # Run PSO
-    optimizer = PSOOptimizer(config, simulator)
+    # Generate a shared wafer set for fair comparison
+    wafers = generate_wafers(config.num_wafers, simulator.num_operations, seed=42)
+
+    # Run PSO with the shared wafers
+    optimizer = PSOOptimizer(config, simulator, wafers=wafers)
     best_position, best_result, fitness_history = optimizer.optimize()
 
     print("\n=== Optimization Results ===")
@@ -167,8 +177,23 @@ def run_pso_comparison():
     for i in range(0, len(fitness_history), 5):
         print(f"Iter {i:2d}: {fitness_history[i]:.2f}")
 
+    # =========================================================
+    # 修复报错区：在这里打印最优结果，因为这里有 best_result 变量
+    # =========================================================
+    print("=== Optimized Machine Schedule ===")
+    for record in sorted(best_result.machine_schedule, key=lambda item: (item["start"], item["machine"], item["operation"])):
+        jobs = ",".join(record["jobs"])
+        batch_label = "BATCH" if record["machine_type"] == "batch" else "STD "
+        print(
+            f'{batch_label} {record["machine"]} {record["operation"]} '
+            f'[{record["start"]:.1f}, {record["end"]:.1f}] jobs=[{jobs}]'
+        )
+
     return best_position, best_result, fitness_history
 
 
 if __name__ == "__main__":
+    # 为了保证结果可复现，你可以加一行固定随机种子
+    random.seed(42)
+    np.random.seed(42)
     run_pso_comparison()
